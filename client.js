@@ -6,6 +6,7 @@ const uuid = require('uuid')
 const Vorpal = require('vorpal')
 const setUpChannelWithRetry = require('./rabbitmq_connection')
 const CLIENT_CONSUMER_TAG = uuid.v4()
+const connectionRetryInterval = 3
 
 let REPLY_QUEUE = null
 let CHANNEL = null
@@ -13,7 +14,10 @@ let CHANNEL = null
 const vorpal = new Vorpal().delimiter('glacier$')
 
 function withDefaultOption(command) {
-  return command.option('-r, --region <region>', 'Glacier AWS region', ['us-west-2'])
+  return command.option('-r, --region <region>', 'Glacier AWS region', ['us-west-2']).validate((args) => {
+    if (CHANNEL != null) { return true; }
+    return "Please wait for server connection to be re-established."
+  })
 }
 
 function createCommand(cli, commandStr, callback) {
@@ -25,7 +29,7 @@ function listVaults(args, fin) {
   console.log('List Vaults')
 
   queueJob({
-    region: args.options.region,
+    region: args.options.region || 'us-west-2',
     type: JOB_TYPES.LIST_VAULTS
   }, (msg) => {
     printVaultInfo(msg)
@@ -35,24 +39,73 @@ function listVaults(args, fin) {
 
 createCommand(vorpal, 'lv', listVaults)
 
+function vaultInventory(args, fin) {
+  if (args.vaultName == null) {
+    console.log("Please specify vault name for this operation.")
+  }
+
+  console.log(`Vault Inventory for ${args.vaultName}`)
+
+  queueJob({
+    region: args.options.region || 'us-west-2',
+    vaultName: args.vaultName,
+    type: JOB_TYPES.VAULT_INVENTORY
+  }, (msg) => {
+    console.log(`Vault inventory job has been queued with ID ${msg}`)
+    fin()
+  }) 
+}
+
+createCommand(vorpal, 'vi <vaultName>', vaultInventory)
+
+function listJobs(args, fin) {
+  if (args.vaultName == null) {
+    console.log("Please specify vault name for this operation.")
+  }
+
+  console.log(`List jobs for vault ${args.vaultName}`)
+
+  queueJob({
+    region: args.options.region || 'us-west-2',
+    vaultName: args.vaultName,
+    type: JOB_TYPES.LIST_JOBS
+  }, (msg) => {
+    console.log(msg)
+    logCommandSeperator()
+    fin()
+  })     
+}
+
+createCommand(vorpal, 'lj <vaultName>', listJobs)
+
+
+
+
+
+
+
+
+
+
+
 function queueJob(job, done){
   let ch = CHANNEL
-  assertReplyQueue(ch).then((q) => {
+  setUpQueues(ch).then((q) => {
     
     console.log(`Sending request to server...\n`)
 
-    ch.sendToQueue(WORK_QUEUE, Buffer.from(JSON.stringify(job)),
+    ch.sendToQueue(WORK_QUEUE, serializeJSONMessage(job),
       {replyTo: q, correlationId: uuid.v4()})
     
     ch.consume(q, (msg) => {
-      done(JSON.parse(msg.content.toString()))
       ch.cancel(CLIENT_CONSUMER_TAG)
+      done(deserializeJSONMessage(msg))
     }, {noAck: true, consumerTag: CLIENT_CONSUMER_TAG})
 
   })
 }
 
-function assertReplyQueue(ch){
+function setUpQueues(ch){
   assertWorkQueuePromise = ch.assertQueue(WORK_QUEUE)
 
   if (REPLY_QUEUE == null) {
@@ -60,7 +113,7 @@ function assertReplyQueue(ch){
       return ok.queue
     })
   } else {
-    assertReplyQueuePromise = new Promise((resolve, reject) => {
+    assertReplyQueuePromise = new Promise((resolve, _) => {
       resolve(REPLY_QUEUE)
     })
   }
@@ -103,11 +156,19 @@ function logCommandSeperator(){
   console.log("Please enter new command or type `exit` to quit\n")
 }
 
+function serializeJSONMessage(msg) {
+  return Buffer.from(JSON.stringify(msg))
+}
+
+function deserializeJSONMessage(msg) {
+  return JSON.parse(msg.content.toString())
+}
+
 setUpChannelWithRetry((ch) => {
   CHANNEL = ch
   console.log("Connected to RabbitMQ.")
   vorpal.show()
 }, (error) => {
   CHANNEL = null
-  console.log("Cannot connect to RabbitMQ, retrying...")
-}, 3)
+  console.log(`Cannot connect to RabbitMQ, retrying in ${connectionRetryInterval} seconds...`)
+}, connectionRetryInterval)

@@ -5,8 +5,8 @@ function connectToRabbit(retryOnError){
 
     // console.log("Connected to RabbitMQ.")
 
-    // conn.on('error', retryOnError)
-    // conn.on('close', retryOnError)
+    conn.on('error', retryOnError)
+    conn.on('close', retryOnError)
 
     return conn.createChannel().then((ch) => {
       // console.log("Channel established.")
